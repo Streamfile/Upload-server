@@ -1,10 +1,10 @@
 %%%-------------------------------------------------------------------
-%%% @author Niclas Axelsson <burbas@Niclass-MacBook-Pro-2.local>
+%%% @author Niclas Axelsson <niclas@burbas.se>
 %%% @copyright (C) 2014, Niclas Axelsson
 %%% @doc
-%%%
+%%% Main interface for upload-server
 %%% @end
-%%% Created : 15 May 2014 by Niclas Axelsson <burbas@Niclass-MacBook-Pro-2.local>
+%%% Created : 15 May 2014 by Niclas Axelsson <niclas@burbas.se>
 %%%-------------------------------------------------------------------
 -module(upload_server).
 
