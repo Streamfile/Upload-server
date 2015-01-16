@@ -1,17 +1,17 @@
 %%%-------------------------------------------------------------------
-%%% @author Niclas Axelsson <burbas@Niclass-MacBook-Pro-2.local>
-%%% @copyright (C) 2014, Niclas Axelsson
+%%% @author Niclas Axelsson <niclas@burbas.se>
+%%% @copyright (C) 2014-2015, Niclas Axelsson
 %%% @doc
-%%%
+%%% Worker module for the upload server
 %%% @end
-%%% Created : 15 May 2014 by Niclas Axelsson <burbas@Niclass-MacBook-Pro-2.local>
+%%% Created : 15 May 2014 by Niclas Axelsson <niclas@burbas.se>
 %%%-------------------------------------------------------------------
 -module(upload_server_worker).
 
 -behaviour(gen_server).
 
 %% API
--export([start_link/3]).
+-export([start/4]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -22,6 +22,7 @@
 -record(state, {
           stream_id = "",
           file_count = 1,
+          total_files = 1,
           files = [],
           chunks = [],
           current_file_size = 0,
@@ -40,8 +41,8 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link(StreamID, MaxFileSize, User) ->
-    gen_server:start_link(?MODULE, [StreamID, MaxFileSize, User], []).
+start(StreamID, MaxFileSize, User, FileCount) ->
+    gen_server:start(?MODULE, [StreamID, MaxFileSize, User, FileCount], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -58,11 +59,12 @@ start_link(StreamID, MaxFileSize, User) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([StreamID, MaxFileSize, User]) ->
+init([StreamID, MaxFileSize, User, FileCount]) ->
     {ok, #state{
        stream_id = StreamID,
        user = User,
-       max_file_size = MaxFileSize
+       max_file_size = MaxFileSize,
+       total_files = FileCount
       }}.
 
 %%--------------------------------------------------------------------
@@ -79,41 +81,63 @@ init([StreamID, MaxFileSize, User]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_call({new_part, undefined, Params, File}, _From, State = #state{
-                                                      files = Files,
-                                                      current_file_size = CFS,
-                                                      max_file_size = MFS
-                                                     }) when MFS >= CFS ->
-    %% This file is not chunked. Just let it pass
-    FinishedFile = [{original_name, proplists:get_value("name", Params)}, {temp_file, File:temp_file()}, {size, File:size()}],
-    {reply, {file, File}, State#state{files = [FinishedFile|Files]}};
 
-handle_call({new_part, Chunk, Params, File}, _From, State = #state{
-                                                      file_count = FC,
-                                                      files = Files,
-                                                      chunks = Chunks,
-                                                      current_file_size = CFS,
-                                                      max_file_size = MFS
-                                                     }) when MFS >= CFS ->
+%% COMPLETE FILES WITHOUT CHUNKING
+handle_call({new_part, undefined, Params, [File]}, _From, State = #state{
+                                                            stream_id = StreamID,
+                                                            total_files = TotalFileCount,
+                                                            file_count = TotalFileCount,
+                                                            files = Files,
+                                                            current_file_size = CFS,
+                                                            max_file_size = MFS
+                                                           }) when MFS >= CFS ->
+    case TotalFileCount of
+        1 ->
+            %% We just return the file
+            CurrentFile = [
+                           {original_name, proplists:get_value("name", Params)},
+                           {temp_file, sb_uploaded_file:temp_file(File)},
+                           {size, sb_uploaded_file:size(File)}
+                          ],
+            {stop, {normal, StreamID}, {ok, File}, State#state{files = [CurrentFile|Files]}};
+        _ ->
+            %% Zip the files and return
+            Filename = archive_files([File|Files]),
+            {stop, {normal, StreamID}, {ok, Filename}, State}
+    end;
+handle_call({new_part, undefined, Params, [File]}, _From, State = #state{
+                                                            file_count = FileCount,
+                                                            files = Files,
+                                                            current_file_size = CFS,
+                                                            max_file_size = MFS
+                                                           }) when MFS >= CFS ->
+
+
+    {reply, ok, State};
+
+%% FILES WITH CHUNKING
+handle_call({new_part, ChunkNo, Params, [File]}, _From, State = #state{
+                                                          stream_id = StreamID,
+                                                          file_count = FC,
+                                                          files = Files,
+                                                          chunks = Chunks,
+                                                          current_file_size = CFS,
+                                                          max_file_size = MFS
+                                                         }) when MFS >= CFS ->
     %% Check which chunk this is
-    ChunkInt = erlang:list_to_integer(Chunk),
-    ChunksInt = erlang:list_to_integer(proplists:get_value("chunks", Params, Chunk)),
+    ChunksInt = erlang:list_to_integer(proplists:get_value("chunks", Params, "1")),
     case ChunksInt-1 of
-        ChunkInt ->
+        ChunkNo ->
             %% This is the last chunk so let's concat the whole thing
-            TempFiles = [ X:temp_file() || X <- [File|Chunks] ],
-            os:cmd(lists:concat(["cat ", string:join(lists:reverse(TempFiles), " "), " > ", File:temp_file(), "_fin"])),
-            %% Remove all the file pieces
-            os:cmd(lists:concat(["rm ", string:join(TempFiles, " ")])),
-            %% Store the file information
-            FinishedFile = [{original_name, proplists:get_value("name", Params)}, {temp_file, File:temp_file() ++ "_fin"}, {size, File:size() + CFS}],
-            {reply, {ok, FinishedFile}, State#state{chunks = [], file_count = FC+1, files = [FinishedFile|Files]}};
+            FinishedFile = pack_file([File|Chunks]),
+            {stop, {normal, StreamID}, {ok, FinishedFile}, State#state{chunks = [], file_count = FC+1, files = Files}};
         _ ->
             %% We are currently receiving a chunk
-            {reply, ok, State#state{chunks = [File|Chunks], current_file_size = File:size() + CFS}}
+            {reply, ok, State#state{chunks = [File|Chunks], current_file_size = sb_uploaded_file:size(File) + CFS}}
     end;
+
 handle_call({new_part, _Params, _File}, _From, State) ->
-    {stop, file_to_big, {error, file_to_big}, State};
+    {stop, {file_to_big, State#state.stream_id}, State};
 handle_call(_Request, _From, State) ->
     Reply = ok,
     {reply, Reply, State}.
@@ -157,8 +181,8 @@ handle_info(_Info, State) ->
 %%--------------------------------------------------------------------
 terminate(_Reason, #state{chunks = Chunks, files = Files}) ->
     %% Remove all the files we've gathered during this transfer
-    TempFiles = [ X:temp_file() || X <- Chunks ++ Files ],
-    os:cmd(lists:concat(["rm ", string:join(TempFiles, " ")])),
+    %TempFiles = [ sb_uploaded_file:temp_file(X) || X <- Chunks ++ Files ],
+    %os:cmd(lists:concat(["rm ", string:join(TempFiles, " ")])),
     ok.
 
 %%--------------------------------------------------------------------
@@ -175,3 +199,13 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+pack_file(Chunks) ->
+    Filename = lists:concat([sb_uploaded_file:temp_file(hd(Files)), "_fin"]),
+    TempFiles = [ sb_uploaded_file:temp_file(X) || X <- Files ],
+    os:cmd(lists:concat(["cat ", string:join(lists:reverse(TempFiles), " "), " > ", Filename])),
+    %% Remove all the file pieces
+    CMD = lists:concat(["rm ", string:join(TempFiles, " ")]),
+    io:format("~p~n", [CMD]),
+    os:cmd(CMD),
+    %% Return the filename for the zip
+    Filename.

@@ -11,7 +11,11 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0]).
+-export([
+         start_link/0,
+         checkout/3,
+         report_part/5
+        ]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -35,7 +39,22 @@
 %% @end
 %%--------------------------------------------------------------------
 start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+    gen_server:start_link({global, ?SERVER}, ?MODULE, [], []).
+
+
+checkout(Identifier, User, FileCount) ->
+    gen_server:call({global, ?MODULE}, {checkout, Identifier, User, FileCount}).
+
+report_part(Identifier, User, Chunk, Params, File) when is_integer(Chunk) ->
+    FileCount = proplists:get_value("file_count", Params, "1"),
+    {ok, Worker} = checkout(Identifier, User, erlang:list_to_integer(FileCount)),
+    gen_server:call(Worker, {new_part, Chunk, Params, File});
+report_part(Identifier, User, Chunk, Params, File) when is_list(Chunk) ->
+    report_part(Identifier, User, erlang:list_to_integer(Chunk), Params, File);
+report_part(Identifier, User, _Chunk, Params, File) ->
+    report_part(Identifier, User, 0, Params, File).
+
+
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -70,14 +89,14 @@ init([]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_call({checkout, Identifier, User}, _From, State = #state{workers = Workers}) ->
+handle_call({checkout, Identifier, User, FileCount}, _From, State = #state{workers = Workers}) ->
     case dict:find(Identifier, Workers) of
         {ok, Worker} ->
             {reply, {ok, Worker}, State};
         _ ->
             %% Create a new worker
-            StreamID = id_manager:generate_id(),
-            {ok, Pid} = upload_server_worker:start_link(StreamID, User),
+            MaxFileSize = user_lib:upload_limit(User) * 1024,
+            {ok, Pid} = upload_server_worker:start(Identifier, MaxFileSize, User, FileCount),
             {reply, {ok, Pid}, State#state{workers = dict:store(Identifier, Pid, Workers)}}
     end;
 
@@ -108,6 +127,9 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_info({'EXIT', _Pid, {normal, Identifier}}, State) ->
+    Workers = dict:erase(Identifier, State#state.workers),
+    {noreply, State#state{workers = Workers}};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -139,3 +161,18 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+generate_id() ->
+    random:seed(now()),
+    Id = generate_id1([], 12).
+
+generate_id1(Acc, MaxLength) when length(Acc) == MaxLength ->
+    Acc;
+generate_id1(Acc, MaxLength) ->
+    case random:uniform(62) of
+        I when I =< 10 ->
+            generate_id1([47+I | Acc], MaxLength);
+        I when I =< 36 ->
+            generate_id1([54+I | Acc], MaxLength);
+        I ->
+            generate_id1([60+I | Acc], MaxLength)
+    end.

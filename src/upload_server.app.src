@@ -1,0 +1,14 @@
+{application, upload_server,
+ [
+  {description, "Streamfile Upload Server (SUS)"},
+  {vsn, "0.1.1"},
+  {registered, [
+                upload_server
+               ]},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {mod, { upload_server_app, []}},
+  {env, []}
+ ]}.
